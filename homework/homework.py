@@ -44,13 +44,9 @@
 # - Elimine los registros con informacion no disponible.
 # - Para la columna EDUCATION, valores > 4 indican niveles superiores
 #   de educación, agrupe estos valores en la categoría "others".
-# - Renombre la columna "default payment next month" a "default"
-# - Remueva la columna "ID".
-#
 #
 # Paso 2.
 # Divida los datasets en x_train, y_train, x_test, y_test.
-#
 #
 # Paso 3.
 # Cree un pipeline para el modelo de clasificación. Este pipeline debe
@@ -58,7 +54,6 @@
 # - Transforma las variables categoricas usando el método
 #   one-hot-encoding.
 # - Ajusta un modelo de bosques aleatorios (rando forest).
-#
 #
 # Paso 4.
 # Optimice los hiperparametros del pipeline usando validación cruzada.
@@ -93,108 +88,114 @@
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
 import gzip
-import pandas as pd
-import os
-import glob
-import pickle
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.pipeline import Pipeline
-from sklearn.model_selection import GridSearchCV
 import json
-import time
-from sklearn.metrics import (
-    precision_score, balanced_accuracy_score, recall_score, f1_score, confusion_matrix
-)
-inicio = time.time()
-input = glob.glob("files/input/*.zip")
-train_path = [f for f in input if "train" in f.lower()][0]
-test_path = [f for f in input if "test" in f.lower()][0]
+import os
+import pickle
+import zipfile
 
-def limpieza(df):
-    df = df.copy()
-    df = df.rename(columns = {'default payment next month': 'default'})
-    df = df.drop(columns = "ID")
-    df = df[(df['EDUCATION'] != 0) & (df['MARRIAGE'] != 0)]
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+)
+from sklearn.model_selection import GridSearchCV
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
+
+
+def load_and_clean(filename):
+    with zipfile.ZipFile(filename, "r") as z:
+        with z.open(z.namelist()[0]) as f:
+            df = pd.read_csv(f)
+
+    df = df.rename(columns={"default payment next month": "default"})
+    df = df.drop(columns=["ID"])
     df = df.dropna()
-    df.loc[df['EDUCATION'] > 4, 'EDUCATION'] = 4
+    df.loc[df["EDUCATION"] > 4, "EDUCATION"] = 4
     return df
 
-train = limpieza(pd.read_csv(train_path, compression="zip"))
-test = limpieza(pd.read_csv(test_path, compression="zip"))
-x_test, y_test = test.drop(columns = "default"),test["default"]
-x_train, y_train = train.drop(columns = "default"),train["default"]
+train_df = load_and_clean("files/input/train_data.csv.zip")
+test_df = load_and_clean("files/input/test_data.csv.zip")
 
-noNumericas = ['SEX', 'EDUCATION', 'MARRIAGE']
+x_train = train_df.drop(columns=["default"])
+y_train = train_df["default"]
+x_test = test_df.drop(columns=["default"])
+y_test = test_df["default"]
+
+categorical_cols = [
+    "SEX", "EDUCATION", "MARRIAGE", "PAY_0", "PAY_2",
+    "PAY_3", "PAY_4", "PAY_5", "PAY_6",
+]
+numeric_cols = [col for col in x_train.columns if col not in categorical_cols]
 
 preprocessor = ColumnTransformer(
     transformers=[
-        (
-            'cat', 
-            OneHotEncoder(handle_unknown='ignore'), # 'ignore' evita errores si aparece algo nuevo en el test
-            noNumericas
-        )
-    ],
-    remainder='passthrough'
+        ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False), categorical_cols),
+        ("num", MinMaxScaler(), numeric_cols),
+    ]
 )
 
-
 pipeline = Pipeline(steps=[
-    ('preprocessor', preprocessor),
-    ('classifier', RandomForestClassifier(random_state=42))
+    ("preprocessor", preprocessor),
+    ("classifier", RandomForestClassifier(random_state=0, max_samples=0.8)),
 ])
 
 param_grid = {
-    'classifier__n_estimators': [100,200,300],      # Número de árboles en el bosque
-    'classifier__max_depth': [None, 20, 30],
-    'classifier__min_samples_split': [2, 5, 10],    # Profundidad máxima del árbol
+    "classifier__n_estimators": [500, 700],
+    "classifier__max_depth": [None],
+    "classifier__min_samples_split": [2, 5],
 }
 
-grid_search = GridSearchCV(
-    estimator=pipeline,           # Tu pipeline creado en el paso 3
-    param_grid=param_grid,        # Las combinaciones a probar
-    cv=10,                        # 10 splits (validación cruzada)
-    scoring='balanced_accuracy',  # La métrica que te pidió el ejercicio
-    n_jobs=-1                     # Usa todos los procesadores de tu PC para ir más rápido
+model = GridSearchCV(
+    pipeline,
+    param_grid,
+    cv=10,
+    scoring="balanced_accuracy",
+    n_jobs=-1,
+    verbose=1,
 )
-grid_search.fit(x_train, y_train)
 
-#guardarlo
+model.fit(x_train, y_train)
+
 os.makedirs("files/models", exist_ok=True)
-with gzip.open("files/models/model.pkl.gz", "wb") as file:
-    pickle.dump(grid_search, file)
+with gzip.open("files/models/model.pkl.gz", "wb") as f:
+    pickle.dump(model, f)
+
+
+def compute_metrics(model, x, y, dataset_name):
+    y_pred = model.predict(x)
+    return {
+        "type": "metrics",
+        "dataset": dataset_name,
+        "precision": precision_score(y, y_pred, zero_division=0),
+        "balanced_accuracy": balanced_accuracy_score(y, y_pred),
+        "recall": recall_score(y, y_pred, zero_division=0),
+        "f1_score": f1_score(y, y_pred, zero_division=0),
+    }
+
+
+def compute_cm(model, x, y, dataset_name):
+    y_pred = model.predict(x)
+    cm = confusion_matrix(y, y_pred)
+    return {
+        "type": "cm_matrix",
+        "dataset": dataset_name,
+        "true_0": {"predicted_0": int(cm[0, 0]), "predicted_1": int(cm[0, 1])},
+        "true_1": {"predicted_0": int(cm[1, 0]), "predicted_1": int(cm[1, 1])},
+    }
+
 
 os.makedirs("files/output", exist_ok=True)
-
-def calcular_y_guardar_metricas(x, y, model, dataset_name):
-    y_pred = model.predict(x)
-    
-    # Calculamos las métricas clave
-    metricas = {
-        "type": "metrics",
-        'dataset': dataset_name,
-        'precision': precision_score(y, y_pred, zero_division=0),
-        'balanced_accuracy': balanced_accuracy_score(y, y_pred),
-        'recall': recall_score(y, y_pred),
-        'f1_score': f1_score(y, y_pred)
-    }
-    
-    # Calculamos la matriz de confusión
-    cm = confusion_matrix(y, y_pred)
-    matriz = {
-        'type': 'cm_matrix',
-        'dataset': dataset_name,
-        'true_0': {"predicted_0": int(cm[0, 0]), "predicted_1": int(cm[0, 1])},
-        'true_1': {"predicted_0": int(cm[1, 0]), "predicted_1": int(cm[1, 1])}
-    }
-    
-    return metricas, matriz
-
-train_m, train_cm = calcular_y_guardar_metricas(x_train, y_train, grid_search, 'train')
-test_m, test_cm = calcular_y_guardar_metricas(x_test, y_test, grid_search, 'test')
-
 with open("files/output/metrics.json", "w") as f:
-    for item in [train_m, test_m, train_cm, test_cm]:
-        f.write(json.dumps(item) + "\n")
-fin = time.time()
+    for metrics_data in [
+        compute_metrics(model, x_train, y_train, "train"),
+        compute_metrics(model, x_test, y_test, "test"),
+        compute_cm(model, x_train, y_train, "train"),
+        compute_cm(model, x_test, y_test, "test"),
+    ]:
+        f.write(json.dumps(metrics_data) + "\n")
